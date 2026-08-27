@@ -1,0 +1,50 @@
+# Local development dependencies only: Postgres + Redis.
+# The app and the observability stack (Prometheus/Alertmanager/Grafana) are
+# added in later phases. Run from the repo root with:
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# Credentials/ports here intentionally match the defaults in .env.example so a
+# fresh clone works with `cp .env.example .env` and nothing else.
+
+name: observable-url-shortener
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: ous-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: urlshortener
+      POSTGRES_PASSWORD: urlshortener
+      POSTGRES_DB: urlshortener
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` confirms the server accepts connections, not just that the
+      # container process is up — this is what /ready will later depend on.
+      test: ["CMD-SHELL", "pg_isready -U urlshortener -d urlshortener"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: ous-redis
+    restart: unless-stopped
+    # appendonly persists rate-limit/cache state across restarts during local dev.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

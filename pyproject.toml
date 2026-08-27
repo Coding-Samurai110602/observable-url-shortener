@@ -1,0 +1,78 @@
+[project]
+name = "observable-url-shortener"
+version = "0.1.0"
+description = "Production-style, observable, rate-limited URL shortener."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+# Runtime dependencies. Pinned with compatible-release (~=) on the current
+# stable major/minor so `pip install` is reproducible enough for a portfolio
+# repo while still picking up patch fixes. A lockfile is produced separately.
+dependencies = [
+    # --- Web framework / server ---
+    "fastapi~=0.115.0",
+    "uvicorn[standard]~=0.34.0",
+    # --- Config / validation ---
+    "pydantic~=2.10.0",
+    "pydantic-settings~=2.7.0",
+    # --- Redis (async client; caching + rate-limit state) ---
+    "redis~=5.2.0",
+    # --- PostgreSQL (async) + migrations ---
+    "sqlalchemy[asyncio]~=2.0.36",
+    "asyncpg~=0.30.0",
+    "alembic~=1.14.0",
+    # --- Observability ---
+    "prometheus-client~=0.21.0",
+    "structlog~=24.4.0",
+]
+
+[project.optional-dependencies]
+# Test + load-test tooling. Installed in CI and locally, not in the runtime image.
+dev = [
+    "pytest~=8.3.0",
+    "pytest-asyncio~=0.26.0",
+    "httpx~=0.28.0",
+    "locust~=2.32.0",
+    "ruff~=0.8.0",
+    "mypy~=1.13.0",
+    # In-process Redis (with Lua support) for isolated, deterministic unit tests
+    # of the rate limiter. The [lua] extra pulls in lupa so EVAL/register_script
+    # behave like a real server.
+    "fakeredis[lua]~=2.26.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+# asyncio_mode=auto lets us write `async def test_*` without decorating each one.
+asyncio_mode = "auto"
+# Run all async fixtures AND async tests on one session-wide event loop,
+# matching the actual lifetime of the module-level async engine
+# (app/db/database.py) and the lru_cached async Redis client
+# (app/api/dependencies.py), which are bound to whatever loop first touches
+# them. Both options require pytest-asyncio >= 0.26.0
+# (asyncio_default_test_loop_scope was added in 0.26.0).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Sensible default rule set: pyflakes, pycodestyle, isort, bugbear, pyupgrade.
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]

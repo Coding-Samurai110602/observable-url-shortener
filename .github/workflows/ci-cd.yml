@@ -1,0 +1,12 @@
+# GitHub Actions CI/CD pipeline.
+#
+# Stub for the scaffolding phase. The pipeline (lint + type-check, unit tests,
+# integration tests against service containers, image build/push, deploy) is
+# implemented in the CI/CD phase per the build spec. Kept as a placeholder so
+# the repo structure matches the target layout.
+
+name: ci-cd
+
+# TODO(ci-cd-phase): define triggers, jobs, and service containers.
+on:
+  workflow_dispatch: {}
