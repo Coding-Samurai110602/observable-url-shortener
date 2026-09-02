@@ -56,6 +56,13 @@ groups:
       # <1ms). Set wide intentionally for local dev where background OS activity
       # can cause transient blips. In production with co-located Redis, tighten
       # to 5–10ms.
+      #
+      # IMPORTANT BLIND SPOT: This rule does NOT cover hard connection failures
+      # (redis.exceptions.ConnectionError). A connection failure never completes,
+      # so it never records a sample in this histogram — rate(...) returns 0 and
+      # this alert stays silent even during a full Redis outage. See
+      # RedisFallbackActive (rule 6) for that signal; the two rules are
+      # complementary, not redundant. Confirmed blind spot: POSTMORTEM-001.
       # -----------------------------------------------------------------------
       - alert: RedisOperationSlow
         expr: |
@@ -166,3 +173,41 @@ groups:
             1 minute. This indicates an unhandled exception or server-side bug.
             Check structured logs (request.end with status=5xx) and the middleware
             exc_info field for the traceback.
+
+      # -----------------------------------------------------------------------
+      # 6. RedisFallbackActive
+      #
+      # Answers the on-call question: "Is Redis currently unreachable and the app
+      # running in degraded mode (no rate limiting, no cache)?"
+      #
+      # This directly closes the alerting blind spot documented in POSTMORTEM-001:
+      # RedisOperationSlow (rule 2) cannot detect a hard connection failure because
+      # it measures latency of *completed* operations — a ConnectionError never
+      # reaches the observation point. redis_fallback_total is incremented exactly
+      # when a Redis call fails at the connection level and the app falls back
+      # gracefully, making it the primary Redis-outage signal.
+      #
+      # Severity: warning, not critical — the app is still serving traffic
+      # correctly (requests succeed, redirects work), just without rate-limit
+      # enforcement or cache acceleration. The traffic impact is performance
+      # degradation and abuse-window exposure, not an outage.
+      #
+      # Threshold: any fallbacks at all (rate > 0) sustained for 1 minute,
+      # meaning the condition must hold across ~4 evaluation cycles. A single
+      # transient blip won't fire; a genuine outage will.
+      # -----------------------------------------------------------------------
+      - alert: RedisFallbackActive
+        expr: sum(rate(redis_fallback_total[2m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "App is falling back — Redis is unreachable"
+          description: >
+            redis_fallback_total has been increasing for more than 1 minute,
+            meaning Redis is currently unreachable and the app is running without
+            rate limiting (fail-open) and without cache acceleration (falling through
+            to Postgres on every redirect). This is the failure mode documented in
+            POSTMORTEM-001. Check Redis container/service health. Note: HighErrorRate
+            should NOT be co-firing — if it is, the fallback handling itself has
+            regressed. See RedisOperationSlow for slow-but-reachable Redis issues.

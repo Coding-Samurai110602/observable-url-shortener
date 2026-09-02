@@ -137,3 +137,27 @@ async def test_unknown_route_class_raises() -> None:
     limiter = RateLimiter(_fake_redis(), _make_settings(), clock=lambda: 1_000.0)
     with pytest.raises(ValueError):
         await limiter.check("client-a", "does-not-exist")  # type: ignore[arg-type]
+
+
+async def test_redis_connection_failure_fails_open() -> None:
+    """When Redis raises ConnectionError, check() fails open: allowed=True, no raise.
+
+    The NaN sentinel on tokens_remaining distinguishes this from a real token
+    count — it is never equal to any float (NaN != NaN) and signals to any
+    inspection code that the fail-open path was taken.
+    """
+    import math
+    from unittest.mock import AsyncMock
+
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    limiter = RateLimiter(_fake_redis(), _make_settings(), clock=lambda: 1_000.0)
+    # Swap out the registered Lua script with one that simulates a Redis outage.
+    limiter._script = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
+
+    result = await limiter.check("client-fail", "redirect")
+
+    assert result.allowed is True
+    assert result.retry_after_seconds is None
+    # NaN is the sentinel proving the fail-open path ran, not a normal allow.
+    assert math.isnan(result.tokens_remaining)

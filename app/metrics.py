@@ -70,9 +70,22 @@ db_query_duration_seconds = Histogram(
 # Redis operation histogram per operation so cache GET latency is visible
 # separately from SET and the rate-limiter's atomic Lua EVAL. A degrading Redis
 # cluster typically shows p99 drift here before overall HTTP tail latency moves.
+# NOTE: this histogram only records completed operations — it is structurally
+# blind to hard connection failures (ConnectionError), which never reach the
+# observation point. Use redis_fallback_total for that signal instead.
 redis_operation_duration_seconds = Histogram(
     "redis_operation_duration_seconds",
     "Latency of individual Redis operations, labeled by operation type.",
     labelnames=["operation"],
     buckets=_DURATION_BUCKETS,
+)
+
+# Incremented every time the app degrades gracefully because Redis was unreachable —
+# the one signal redis_operation_duration_seconds cannot provide, since it only
+# records operations that complete. A non-zero rate here means Redis is down and
+# the app is running without rate limiting or caching (still serving traffic).
+redis_fallback_total = Counter(
+    "redis_fallback_total",
+    "Redis operations that fell back to fail-open/fail-safe because Redis was unreachable.",
+    labelnames=["component", "operation"],
 )

@@ -32,15 +32,20 @@ sweeper.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+import structlog
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.config import Settings
-from app.metrics import redis_operation_duration_seconds
+from app.metrics import redis_fallback_total, redis_operation_duration_seconds
+
+_log = structlog.get_logger(__name__)
 
 # Route classes get different bucket sizes/refill rates (redirects are cheap and
 # high-volume; creates are expensive and low-volume).
@@ -200,13 +205,38 @@ class RateLimiter:
 
         # One await == one atomic server-side execution. This is the whole point.
         _t0 = time.perf_counter()
-        raw = await self._script(
-            keys=[key],
-            args=[capacity, refill_per_minute, now_ms, 1],
-        )
-        redis_operation_duration_seconds.labels(operation="token_bucket").observe(
-            time.perf_counter() - _t0
-        )
+        try:
+            raw = await self._script(
+                keys=[key],
+                args=[capacity, refill_per_minute, now_ms, 1],
+            )
+            redis_operation_duration_seconds.labels(operation="token_bucket").observe(
+                time.perf_counter() - _t0
+            )
+        except RedisError as exc:
+            # Mirror of hash_client_ip() in app/api/dependencies.py — inlined to
+            # avoid a circular import (dependencies.py imports from this module).
+            client_id_hash = hashlib.sha256(
+                f"{self._settings.ip_hash_salt}:{client_id}".encode()
+            ).hexdigest()
+            _log.warning(
+                "rate_limiter.redis_unavailable",
+                route_class=route_class,
+                client_id_hash=client_id_hash,
+                error=str(exc),
+            )
+            redis_fallback_total.labels(
+                component="rate_limiter", operation="token_bucket"
+            ).inc()
+            # Fail open: allow the request through rather than returning 500.
+            # tokens_remaining=nan is a deliberate sentinel — not a valid token
+            # count, distinguishable from any real result, and causes callers that
+            # do numeric comparisons to behave safely (nan < x is always False).
+            return RateLimitResult(
+                allowed=True,
+                retry_after_seconds=None,
+                tokens_remaining=float("nan"),
+            )
 
         allowed = bool(int(raw[0]))
         retry_after_ms = int(raw[1])

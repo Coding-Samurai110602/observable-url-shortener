@@ -18,11 +18,13 @@ import time
 
 import structlog
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.config import Settings
 from app.metrics import (
     cache_hit_total,
     cache_miss_total,
+    redis_fallback_total,
     redis_operation_duration_seconds,
 )
 
@@ -53,13 +55,26 @@ class UrlCache:
         ``GETEX`` so frequently-accessed links remain cached.
         """
         _t0 = time.perf_counter()
-        value = await self._redis.getex(
-            self._key(short_code),
-            ex=self._settings.cache_ttl_seconds,
-        )
-        redis_operation_duration_seconds.labels(operation="get").observe(
-            time.perf_counter() - _t0
-        )
+        try:
+            value = await self._redis.getex(
+                self._key(short_code),
+                ex=self._settings.cache_ttl_seconds,
+            )
+            redis_operation_duration_seconds.labels(operation="get").observe(
+                time.perf_counter() - _t0
+            )
+        except RedisError as exc:
+            _log.warning(
+                "cache.redis_unavailable",
+                operation="get",
+                short_code=short_code,
+                error=str(exc),
+            )
+            redis_fallback_total.labels(component="cache", operation="get").inc()
+            # Treat as a cache miss — the caller falls through to Postgres, which
+            # is exactly the cache-aside pattern's designed fallback for this case.
+            return None
+
         # Route label is hardcoded to the redirect template because get_cached_url
         # is only called from GET /{short_code}; passing route as a parameter
         # would require a verified-file signature change that isn't warranted here.
@@ -86,17 +101,39 @@ class UrlCache:
         """
         ttl = ttl_seconds if ttl_seconds is not None else self._settings.cache_ttl_seconds
         _t0 = time.perf_counter()
-        await self._redis.set(self._key(short_code), long_url, ex=ttl)
-        redis_operation_duration_seconds.labels(operation="set").observe(
-            time.perf_counter() - _t0
-        )
+        try:
+            await self._redis.set(self._key(short_code), long_url, ex=ttl)
+            redis_operation_duration_seconds.labels(operation="set").observe(
+                time.perf_counter() - _t0
+            )
+        except RedisError as exc:
+            _log.warning(
+                "cache.redis_unavailable",
+                operation="set",
+                short_code=short_code,
+                error=str(exc),
+            )
+            redis_fallback_total.labels(component="cache", operation="set").inc()
+            # Swallow — the redirect already succeeded; a failed cache write just
+            # means the next read will miss and fall through to Postgres again.
         # No separate cache_fill counter — the spec defines only hit/miss counters;
         # the set operation is captured in redis_operation_duration_seconds.
 
     async def invalidate_cached_url(self, short_code: str) -> None:
         """Explicitly evict ``short_code`` from the cache (delete/expiry path)."""
         _t0 = time.perf_counter()
-        await self._redis.delete(self._key(short_code))
-        redis_operation_duration_seconds.labels(operation="delete").observe(
-            time.perf_counter() - _t0
-        )
+        try:
+            await self._redis.delete(self._key(short_code))
+            redis_operation_duration_seconds.labels(operation="delete").observe(
+                time.perf_counter() - _t0
+            )
+        except RedisError as exc:
+            _log.warning(
+                "cache.redis_unavailable",
+                operation="delete",
+                short_code=short_code,
+                error=str(exc),
+            )
+            redis_fallback_total.labels(component="cache", operation="delete").inc()
+            # Swallow — a failed eviction means the stale entry stays until its
+            # TTL expires naturally; no data loss, just a brief stale-cache window.
