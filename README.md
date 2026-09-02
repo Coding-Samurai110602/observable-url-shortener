@@ -5,10 +5,10 @@ engineering, not just CRUD API design: aggressive caching, an atomic Redis
 token-bucket rate limiter, Prometheus metrics wired into real code paths,
 structured JSON logging, and (later) real alerts + an incident postmortem.
 
-> **Status:** core API, rate limiter, cache, Prometheus metrics, and structured
-> JSON logging are complete and tested. The observability stack (Prometheus,
-> Alertmanager, Grafana) is wired. Failure-injection exercise and postmortem
-> are the next manual step.
+> **Status:** core API, rate limiter, cache, Prometheus metrics, structured JSON
+> logging, observability stack (Prometheus / Alertmanager / Grafana), fault
+> tolerance (Redis fail-open), incident postmortem, and CI/CD pipeline are all
+> complete. Docker image publishes to GHCR on every merge to main.
 
 ## Tech stack
 
@@ -115,5 +115,29 @@ docs/       ARCHITECTURE.md, incidents/
 ```bash
 pytest
 ```
+
+## CI/CD
+
+The pipeline lives in `.github/workflows/ci-cd.yml` and runs four jobs:
+
+| Job | Trigger | What it does |
+|---|---|---|
+| **lint** | every push & PR | `ruff check .` + `mypy .` |
+| **test** | every push & PR (needs lint) | spins up Postgres 16 + Redis 7 service containers, runs `alembic upgrade head`, then `pytest tests/unit/ tests/integration/ -v` |
+| **build** | push to `main` only (needs test) | builds the multi-stage Docker image and pushes two tags (`sha-<full-sha>` and `latest`) to GitHub Container Registry |
+| **deploy** | manual (`workflow_dispatch`) only | placeholder — prints the planned ECS Fargate steps; no AWS infrastructure is configured yet |
+
+The deploy job is intentionally manual-trigger only: no automatic deploys happen until the AWS/ECS Fargate target is defined in a future Terraform session.
+
+**Build status and published images** (visible once the repository is public or you have org access):
+
+- Actions runs: `https://github.com/<owner>/observable-url-shortener/actions`
+- Container packages: `https://github.com/<owner>/observable-url-shortener/pkgs/container/observable-url-shortener`
+
+**Docker image** — multi-stage build on `python:3.12-slim`:
+
+- Builder stage installs only the production dependencies from `[project.dependencies]` in `pyproject.toml` into an isolated virtualenv — no `pytest`, `ruff`, `mypy`, or `locust` in the final image.
+- Runtime stage copies the pre-built virtualenv and application source, runs as a non-root system user (`appuser`), and starts uvicorn via the Python API with `log_config=None` so uvicorn's startup messages flow through the same JSON structlog pipeline as the rest of the application (rather than printing in uvicorn's default plain-text format).
+- `HEALTHCHECK` uses the `/health` liveness endpoint (dependency-free by design).
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for design details.

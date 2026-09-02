@@ -1,0 +1,47 @@
+# Version control — never bake git history into an image.
+.git/
+.gitignore
+
+# Python bytecode and build artefacts.
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local virtual environment — the runtime image uses the venv built inside
+# the Docker builder stage, not the host's development venv.
+.venv/
+venv/
+env/
+
+# Test suite — not needed in the production image.
+tests/
+
+# Local environment files.  .env contains secrets and must NEVER be baked
+# into a Docker image layer (layers are permanent even if the file is later
+# removed in a subsequent RUN step).
+.env
+.env.local
+
+# Development-only infrastructure (Prometheus, Grafana, docker-compose, etc.)
+infra/
+
+# Documentation and interview notes — not needed at runtime.
+docs/
+INTERVIEW_PREP.md
+Build-spec/
+
+# Editor and IDE artefacts.
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Static-analysis caches — regenerated on every analysis run.
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

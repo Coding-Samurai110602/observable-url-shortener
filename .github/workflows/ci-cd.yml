@@ -1,12 +1,241 @@
-# GitHub Actions CI/CD pipeline.
+# CI/CD pipeline for the Observable URL Shortener.
 #
-# Stub for the scaffolding phase. The pipeline (lint + type-check, unit tests,
-# integration tests against service containers, image build/push, deploy) is
-# implemented in the CI/CD phase per the build spec. Kept as a placeholder so
-# the repo structure matches the target layout.
+# Jobs and their triggers:
+#
+#   lint    — ruff + mypy on every push and pull request.
+#   test    — full unit + integration test suite (needs lint).
+#   build   — Docker image build + push to GHCR (push to main only, needs test).
+#   deploy  — manual-trigger placeholder pending the AWS/ECS Fargate decision.
+#
+# Cost discipline: the image build only runs on push to main, not on every
+# pull request.  The deploy job is manual-trigger only (workflow_dispatch) —
+# no automatic deploys until an AWS target is defined.
 
-name: ci-cd
+name: CI/CD
 
-# TODO(ci-cd-phase): define triggers, jobs, and service containers.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # workflow_dispatch allows manual triggering of the deploy-placeholder job.
+  # It also re-runs lint and test as a safety gate before any deploy action.
   workflow_dispatch: {}
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Job 1 — lint
+  #
+  # Fail fast on style and type errors before spending time on a full
+  # service-container test run.  Runs on every push and pull request.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache the pip download cache, keyed on pyproject.toml, so repeated
+          # runs with unchanged dependencies skip the network fetch step.
+          cache: pip
+
+      - name: Install dev dependencies
+        # -e (editable) install keeps the source tree as the importable package,
+        # matching the local-dev workflow and avoiding stale bytecode surprises.
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        # Checks rules E (pycodestyle errors), F (pyflakes), I (isort),
+        # B (bugbear), UP (pyupgrade) as configured in [tool.ruff.lint] in
+        # pyproject.toml.
+        run: ruff check .
+
+      - name: Mypy type-check
+        # Uses python_version="3.12", disallow_untyped_defs=true, and the
+        # pydantic.mypy plugin as configured in [tool.mypy] in pyproject.toml.
+        run: mypy .
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — test
+  #
+  # Unit + integration tests against real Postgres 16 and Redis 7 service
+  # containers.  Mirrors the local stack in infra/docker-compose.yml.
+  # Depends on lint so style failures abort the run before paying for services.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Unit & integration tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: urlshortener
+          POSTGRES_PASSWORD: urlshortener
+          POSTGRES_DB: urlshortener
+        ports:
+          - 5432:5432
+        # Wait for Postgres to accept connections before the job steps run.
+        # pg_isready checks that the server is ready for queries, not just that
+        # the process started — the same health-check semantics used in
+        # infra/docker-compose.yml.
+        options: >-
+          --health-cmd "pg_isready -U urlshortener -d urlshortener"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      # All variables mirror .env.example, adjusted for GitHub Actions service
+      # container hostnames (services are accessible at localhost on their
+      # mapped ports — standard GitHub Actions networking).
+      DATABASE_URL: postgresql+asyncpg://urlshortener:urlshortener@localhost:5432/urlshortener
+      REDIS_URL: redis://localhost:6379/0
+      BASE_URL: http://localhost:8000
+      CACHE_TTL_SECONDS: "3600"
+      RATE_LIMIT_REDIRECT_CAPACITY: "100"
+      RATE_LIMIT_REDIRECT_REFILL_PER_MINUTE: "100"
+      RATE_LIMIT_CREATE_CAPACITY: "10"
+      RATE_LIMIT_CREATE_REFILL_PER_MINUTE: "10"
+      SHORT_CODE_LENGTH: "7"
+      # A fixed CI-only salt — not a secret (it only affects the hash of test
+      # IPs; no real PII is involved in CI runs).
+      IP_HASH_SALT: ci-test-salt
+      LOG_LEVEL: WARNING
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run database migrations
+        # alembic reads DATABASE_URL from the environment via app.config.Settings.
+        # This must run before integration tests — the tests assume the schema
+        # exists and do not create tables themselves.
+        run: alembic upgrade head
+
+      - name: Run tests
+        run: pytest tests/unit/ tests/integration/ -v
+
+  # ---------------------------------------------------------------------------
+  # Job 3 — build
+  #
+  # Build the multi-stage Docker image and push it to GitHub Container Registry.
+  # Runs only on push to main (not on pull requests or manual dispatches) to
+  # avoid building an image for every in-progress PR — cost and noise discipline.
+  #
+  # The image is tagged with both the full git SHA (for traceability) and
+  # `latest` (for deployment tooling that pulls by name).
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build & push Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      # `packages: write` is required to push to ghcr.io using GITHUB_TOKEN.
+      # No additional secrets or personal access tokens are needed.
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR image names must be lowercase; GitHub usernames may contain
+      # uppercase letters.  Normalise here so the tag is always valid.
+      - name: Set lowercase image name
+        id: image
+        run: |
+          echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            # Full SHA tag for precise deployment targeting and rollback.
+            type=sha,format=long,prefix=sha-
+            # `latest` for tooling that references the image by name only.
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          # OCI standard labels (org.opencontainers.*) from docker/metadata-action,
+          # including source repo, commit SHA, and build timestamp.
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ---------------------------------------------------------------------------
+  # Job 4 — deploy (placeholder)
+  #
+  # Manual-trigger only (workflow_dispatch).  The actual deployment target
+  # (AWS ECS Fargate + Terraform) is not yet defined; this job is a clearly
+  # labelled placeholder so the pipeline structure is in place and the deploy
+  # step can be wired in once the Terraform session completes.
+  #
+  # To trigger manually: Actions tab → CI/CD → Run workflow.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy (manual placeholder)
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Deployment placeholder
+        run: |
+          echo "================================================================"
+          echo "  DEPLOY PLACEHOLDER — no infrastructure configured yet"
+          echo "================================================================"
+          echo ""
+          echo "This job will be replaced with a real ECS Fargate deploy once"
+          echo "the Terraform session defines:"
+          echo "  • An ECS cluster, task definition, and service"
+          echo "  • IAM roles for the GitHub Actions OIDC provider (no long-lived keys)"
+          echo "  • ECR repo or GHCR → ECS pull-through cache configuration"
+          echo ""
+          echo "Planned implementation steps:"
+          echo "  1. Configure AWS credentials via OIDC:"
+          echo "       aws-actions/configure-aws-credentials@v4"
+          echo "  2. Render a new ECS task definition revision with the target"
+          echo "     image SHA (from the build job's GHCR push)."
+          echo "  3. Update the ECS service and wait for stabilisation:"
+          echo "       aws ecs wait services-stable"
+          echo ""
+          echo "No AWS credentials, ECR repos, or ECS resources exist yet."
+          echo "See docs/ARCHITECTURE.md for the planned deployment topology."
