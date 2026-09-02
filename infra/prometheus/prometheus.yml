@@ -1,0 +1,42 @@
+global:
+  # 15s is a practical default for local dev: short enough to catch a failing
+  # alert within one scrape cycle, not so short that we burn CPU on a laptop.
+  # Tighten to 5s if SLA windows ever shrink below 1 minute in a real deployment.
+  scrape_interval: 15s
+  evaluation_interval: 15s   # alert rules re-evaluated on the same cadence
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            # alertmanager is in the same Docker Compose network, so we reach
+            # it by service name rather than host.docker.internal. Container DNS
+            # resolves "alertmanager" to the container's IP automatically.
+            - alertmanager:9093
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # --- Prometheus self-scrape (conventional; lets you alert on scrape health) ---
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  # --- URL shortener app ---
+  # The app is not containerized yet (runs via `uvicorn` on the host for local
+  # dev). host.docker.internal is provided by Docker Desktop on Mac and Windows;
+  # on Linux, docker-compose.yml adds an extra_hosts entry that maps it to
+  # host-gateway so this target works cross-platform.
+  #
+  # When the app is containerized in the Docker/infra session, replace this
+  # target with the service name (e.g. app:8000) and remove the host.docker.internal
+  # reference entirely — service-name DNS will be correct inside the network.
+  - job_name: url-shortener
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:8000
+        labels:
+          env: local

@@ -1,0 +1,19 @@
+apiVersion: 1
+
+providers:
+  - name: url-shortener
+    orgId: 1
+    type: file
+    # disableDeletion prevents Grafana from removing a dashboard if its JSON
+    # file disappears from the directory (e.g. during a git checkout). Keeps
+    # Grafana state consistent with the repo.
+    disableDeletion: true
+    # editable: true lets you tweak panels in the UI for exploration, but
+    # Grafana will reload from the file on the next provisioning cycle, so
+    # UI edits do not survive a container restart — commit changes to the JSON.
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      # Must match the mount point in docker-compose.yml where the dashboards
+      # directory is mounted inside the Grafana container.
+      path: /var/lib/grafana/dashboards

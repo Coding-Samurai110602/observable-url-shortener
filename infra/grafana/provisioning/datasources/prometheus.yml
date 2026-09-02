@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # A stable UID lets dashboard JSON reference this datasource by ID without
+    # depending on Grafana's auto-assigned internal ID, which can change between
+    # container restarts.
+    uid: prometheus
+    access: proxy           # Grafana backend proxies requests to Prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false         # prevent accidental UI edits from diverging from this file
+    jsonData:
+      timeInterval: "15s"   # matches prometheus.yml scrape_interval; prevents Grafana
+                             # from inferring a step size smaller than the scrape cadence

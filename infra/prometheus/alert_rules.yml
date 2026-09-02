@@ -1,0 +1,168 @@
+groups:
+  - name: url_shortener_alerts
+    # Rules are re-evaluated every evaluation_interval (15s, set in prometheus.yml).
+    # A `for:` clause requires the condition to hold for N consecutive evaluation
+    # cycles before the alert transitions from PENDING to FIRING — this is the
+    # primary mechanism for filtering out single-sample spikes and transient blips.
+    rules:
+
+      # -----------------------------------------------------------------------
+      # 1. HighRedirectLatency
+      #
+      # Answers the on-call question: "Is the redirect hot path noticeably slower
+      # than usual right now?" This is the most user-visible latency signal —
+      # every redirect goes through GET /{short_code} and the cache layer.
+      #
+      # Threshold choice: 500ms p95 is deliberately generous for a local
+      # single-instance setup where both Redis and Postgres are on the same
+      # machine. A real SLA would be closer to 50–100ms p95; do not present
+      # 500ms as production-derived.
+      #
+      # Window: 5m rate smooths short-lived cache-miss storms or GC pauses.
+      # Duration: 2m means the condition must hold for ~8 evaluation cycles,
+      # which filters transient spikes while still catching sustained degradation.
+      # -----------------------------------------------------------------------
+      - alert: HighRedirectLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket{route="/{short_code}"}[5m])) by (le)
+          ) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redirect p95 latency exceeds 500 ms"
+          description: >
+            The 95th-percentile latency for GET /{short_code} has been above 500 ms
+            for more than 2 minutes. Check Redis latency (see RedisOperationSlow),
+            DB query latency (see db_query_duration_seconds dashboard panel), and
+            whether the cache hit ratio has dropped.
+
+      # -----------------------------------------------------------------------
+      # 2. RedisOperationSlow
+      #
+      # Answers the on-call question: "Is Redis itself the bottleneck right now,
+      # before that slowness shows up in overall HTTP latency?" Redis is an
+      # in-memory store; any p95 above a few milliseconds is a sign of trouble.
+      # By alerting on redis_operation_duration_seconds rather than HTTP latency,
+      # we can catch Redis degradation one layer earlier in the call stack.
+      #
+      # The `by (le, operation)` grouping means a separate time series is produced
+      # per operation type (get/set/delete/token_bucket), so the firing alert label
+      # identifies WHICH operation is slow — cache reads vs. rate-limiter writes.
+      #
+      # Threshold: 50ms p95 is very generous for localhost Redis (typical is
+      # <1ms). Set wide intentionally for local dev where background OS activity
+      # can cause transient blips. In production with co-located Redis, tighten
+      # to 5–10ms.
+      # -----------------------------------------------------------------------
+      - alert: RedisOperationSlow
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(redis_operation_duration_seconds_bucket[5m])) by (le, operation)
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis {{ $labels.operation }} p95 latency exceeds 50 ms"
+          description: >
+            The 95th-percentile latency for the Redis '{{ $labels.operation }}' operation
+            has been above 50 ms for more than 2 minutes. This can cause HighRedirectLatency
+            to follow shortly. Check Redis CPU/memory, network, and whether the container
+            is being throttled.
+
+      # -----------------------------------------------------------------------
+      # 3. CacheHitRatioDrop
+      #
+      # Answers the on-call question: "Is the cache doing its job, or is every
+      # redirect falling through to Postgres?" Under normal repeated-URL traffic,
+      # the ratio should climb well above 50% once the cache warms up (popular
+      # links stay cached via the sliding TTL). Sustained drop below 50% suggests:
+      #   - Redis lost state (restart, eviction policy, OOM)
+      #   - Cache TTL is too short relative to traffic patterns
+      #   - Traffic is predominantly unique/first-time URLs (operationally interesting)
+      #
+      # Edge case: both counters are 0 (no traffic) → 0/0 = NaN, which does NOT
+      # satisfy < 0.5, so this alert is silent during idle periods. Correct.
+      #
+      # Warm-up caveat: a freshly started app will have 0% hit ratio for the first
+      # batch of requests. The `for: 5m` duration absorbs this — by 5 minutes into
+      # serving traffic, popular URLs should already be cached. If the ratio is
+      # still below 50% after 5 minutes of traffic, it is worth investigating.
+      #
+      # Threshold: 50% is a deliberately conservative floor. If your traffic
+      # skews toward repeat short codes, raise to 70–80%.
+      # -----------------------------------------------------------------------
+      - alert: CacheHitRatioDrop
+        expr: |
+          sum(rate(cache_hit_total[5m]))
+          /
+          (sum(rate(cache_hit_total[5m])) + sum(rate(cache_miss_total[5m])))
+          < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache hit ratio below 50% for 5 minutes"
+          description: >
+            The Redis cache hit ratio has been below 50% for more than 5 minutes.
+            Current value: {{ $value | humanizePercentage }}. Check whether Redis is
+            healthy (/ready endpoint), whether the cache TTL (CACHE_TTL_SECONDS) is
+            appropriately set, and whether traffic is predominantly new/unique URLs.
+
+      # -----------------------------------------------------------------------
+      # 4. RateLimitRejectionSpike
+      #
+      # Answers the on-call question: "Is someone hammering the API faster than
+      # the token bucket allows, or is a legitimate client misconfigured?" Any
+      # sustained rejection rate indicates either abuse or a broken client.
+      #
+      # Threshold: 1 rejection/second (60/minute) over a 5-minute window is
+      # nearly impossible to hit accidentally in local dev with a single user.
+      # For a multi-user production deployment, this threshold would need to be
+      # raised proportionally (e.g. 10–50/s depending on client count).
+      # -----------------------------------------------------------------------
+      - alert: RateLimitRejectionSpike
+        expr: sum(rate(rate_limit_rejections_total[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate-limit rejections exceeding 1/s"
+          description: >
+            The rate limiter has been rejecting more than 1 request per second
+            for over 2 minutes. This may indicate a client in a retry loop, a
+            load test against a single client IP, or an abuse attempt.
+            Check rate_limit_rejections_total by route_class for breakdown.
+
+      # -----------------------------------------------------------------------
+      # 5. HighErrorRate
+      #
+      # Answers the on-call question: "Is the server returning 5xx errors right
+      # now?" For this service, 5xx responses are always a server-side bug — the
+      # only designed 5xx is HTTP 503 on keyspace saturation (essentially
+      # impossible locally) or an unhandled exception reaching the ASGI layer.
+      # Any sustained 5xx rate is a signal requiring immediate investigation.
+      #
+      # Threshold: > 0 (any 5xx) — correct for this service because we have zero
+      # tolerance for server errors in the happy path.
+      #
+      # Window/duration: 5m rate window with `for: 1m` means the errors must be
+      # repeating across multiple scrapes (not a single one-off request) before
+      # firing. A single anomalous 5xx won't page; a stream of them will.
+      # -----------------------------------------------------------------------
+      - alert: HighErrorRate
+        expr: sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Server is returning 5xx responses"
+          description: >
+            HTTP 5xx responses have been observed at a non-zero rate for more than
+            1 minute. This indicates an unhandled exception or server-side bug.
+            Check structured logs (request.end with status=5xx) and the middleware
+            exc_info field for the traceback.

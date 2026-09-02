@@ -1,14 +1,22 @@
-# Local development dependencies only: Postgres + Redis.
-# The app and the observability stack (Prometheus/Alertmanager/Grafana) are
-# added in later phases. Run from the repo root with:
+# Local development stack: Postgres, Redis, Prometheus, Alertmanager, Grafana.
+# Run from the repo root with:
 #   docker compose -f infra/docker-compose.yml up -d
 #
 # Credentials/ports here intentionally match the defaults in .env.example so a
 # fresh clone works with `cp .env.example .env` and nothing else.
+#
+# The app itself is NOT containerized yet — run it separately on the host with:
+#   uvicorn app.main:app --reload --no-access-log
+# Prometheus scrapes it via host.docker.internal:8000 (see prometheus/prometheus.yml).
 
 name: observable-url-shortener
 
 services:
+
+  # ---------------------------------------------------------------------------
+  # Data layer
+  # ---------------------------------------------------------------------------
+
   postgres:
     image: postgres:16
     container_name: ous-postgres
@@ -45,6 +53,101 @@ services:
       timeout: 3s
       retries: 5
 
+  # ---------------------------------------------------------------------------
+  # Observability stack
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ous-prometheus
+    restart: unless-stopped
+    # --web.enable-lifecycle enables POST /-/reload for hot config reloads
+    # without restarting the container (useful during alert-rule iteration).
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    # host.docker.internal is automatic on Docker Desktop (Mac/Windows).
+    # On Linux, this extra_hosts entry maps it to the host's docker bridge IP.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - alertmanager
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ous-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    # Alertmanager sends webhook notifications to host.docker.internal:9091.
+    # Like Prometheus above, this extra_hosts entry ensures Linux compatibility.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    container_name: ous-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # WARNING: these are local-dev-only defaults. Never use admin/admin in a
+      # shared or production environment — rotate credentials and disable the
+      # default admin user before exposing Grafana to any network.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Disable the signup page for local dev (no need for multi-user auth).
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Suppress the "change your default admin password" banner on first login.
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      # Provisioning: datasources and dashboard loader config (read-only; source
+      # of truth is the files in the repo, not Grafana's internal database).
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # Dashboard JSON files: Grafana loads from this directory on startup and
+      # every updateIntervalSeconds thereafter (see provisioning/dashboards.yml).
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Persist Grafana's internal database (annotations, user state, etc.)
+      # across container restarts so you don't lose manual annotations.
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:

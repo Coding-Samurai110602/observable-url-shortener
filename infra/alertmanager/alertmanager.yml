@@ -1,0 +1,40 @@
+global:
+  # How long to wait before declaring a resolved alert as truly resolved.
+  # 5m gives transient recoveries time to re-fire before Alertmanager sends
+  # a resolve notification, reducing "resolved then immediately re-fired" noise.
+  resolve_timeout: 5m
+
+# In a real deployment, this routing tree would branch by severity (critical →
+# PagerDuty, warning → Slack #alerts-warning) or by team ownership. For local
+# dev with a single developer and no on-call rotation, a single flat route to
+# a webhook is sufficient — watching Alertmanager's own UI at :9093 is equally
+# useful during development.
+route:
+  receiver: webhook-dev
+  group_by:
+    - alertname
+  # group_wait: how long to buffer incoming alerts before sending the first
+  # notification for a new group. 30s is the Alertmanager default; it allows
+  # multiple alerts that fire together (e.g. HighRedirectLatency +
+  # RedisOperationSlow) to be batched into one notification.
+  group_wait: 30s
+  # group_interval: minimum time between notifications for an already-active
+  # group. 5m avoids flooding the receiver with repeated identical messages
+  # while an alert is firing but not yet resolved.
+  group_interval: 5m
+  # repeat_interval: how often to re-notify if an alert is still firing after
+  # the group has already been notified. 1h is appropriate for local dev where
+  # you may step away from the terminal; tighten to 15–30m for production.
+  repeat_interval: 1h
+
+receivers:
+  - name: webhook-dev
+    webhook_configs:
+      # Points at a local webhook listener on the host. Nothing needs to be
+      # running at this address for Alertmanager to start — it will simply
+      # log delivery failures and retry. Options for observing alerts locally:
+      #   (a) Watch the Alertmanager UI at http://localhost:9093 (no listener needed)
+      #   (b) Run `python3 -m http.server 9091` on the host for a trivial log-to-stdout listener
+      #   (c) Replace with a real Slack incoming-webhook URL for a team deployment
+      - url: "http://host.docker.internal:9091/"
+        send_resolved: true
