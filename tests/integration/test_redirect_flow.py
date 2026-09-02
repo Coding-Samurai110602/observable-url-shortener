@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
 
@@ -60,7 +60,7 @@ async def test_redirect_expired_code_returns_404(client: AsyncClient) -> None:
             Url(
                 short_code="expird",
                 long_url="https://example.com/old",
-                expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+                expires_at=datetime.now(UTC) - timedelta(days=1),
             )
         )
         await session.commit()

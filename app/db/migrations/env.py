@@ -23,11 +23,11 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
-from app.db.database import Base
 
 # Import models for their side effect: registering tables on Base.metadata so
 # autogenerate can see them. (noqa: models are used implicitly via metadata.)
 from app.db import models  # noqa: F401
+from app.db.database import Base
 
 # Alembic Config object providing access to values in alembic.ini.
 config = context.config

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import Settings

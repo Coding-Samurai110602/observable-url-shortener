@@ -8,7 +8,7 @@ and no URL-building logic live inline.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import structlog
@@ -91,7 +91,7 @@ async def create_url(
 
     expires_at: datetime | None = None
     if payload.expires_in_days is not None:
-        expires_at = datetime.now(timezone.utc) + timedelta(days=payload.expires_in_days)
+        expires_at = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
 
     try:
         url = await repository.create_url(
@@ -183,7 +183,7 @@ async def redirect(
 
     if long_url is None:
         url = await repository.get_url(session, short_code)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Split not_found and expired into separate branches so redirect_total
         # can carry the precise outcome label for distinct alerting thresholds.
         if url is None:

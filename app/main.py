@@ -8,6 +8,7 @@ structured start/end log lines for every request.
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 import structlog
@@ -39,7 +40,9 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
-    async def observability_middleware(request: Request, call_next: object) -> Response:
+    async def observability_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         """Per-request observability: request ID, structured logs, Prometheus timing.
 
         Two concerns live here rather than in separate middlewares because they

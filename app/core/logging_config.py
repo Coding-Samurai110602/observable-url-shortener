@@ -43,7 +43,7 @@ def configure_logging(settings: Settings) -> None:
     # Processors shared by both structlog-native callers and stdlib-based library
     # loggers (uvicorn, SQLAlchemy, asyncpg). Defined once here so the JSON
     # schema is identical regardless of which logging API the caller used.
-    shared_processors = [
+    shared_processors: list[structlog.typing.Processor] = [
         # Merge per-request context variables bound by the observability
         # middleware (request_id, route, client_id_hash) into every event
         # dict automatically, with no threading through function args.

@@ -20,7 +20,7 @@ from fastapi import params as fastapi_params
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.core.cache import UrlCache
 from app.core.rate_limiter import RateLimiter, RouteClass
 from app.db.database import get_db_session

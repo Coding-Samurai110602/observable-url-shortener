@@ -140,7 +140,10 @@ async def get_top_referrers(
     session: AsyncSession, short_code: str, limit: int
 ) -> list[tuple[str | None, int]]:
     """Return ``(referrer, count)`` pairs for a code, most frequent first."""
-    count_col = func.count().label("count")
+    # Label must not collide with tuple built-in methods (e.g. "count", "index").
+    # Row inherits from tuple, so row.count returns the bound tuple.count method
+    # rather than the aggregate integer — silently wrong, never an int.
+    count_col = func.count().label("click_count")
     _t0 = time.perf_counter()
     result = await session.execute(
         select(ClickEvent.referrer, count_col)
@@ -152,4 +155,4 @@ async def get_top_referrers(
     db_query_duration_seconds.labels(query_type="get_top_referrers").observe(
         time.perf_counter() - _t0
     )
-    return [(row.referrer, row.count) for row in result.all()]
+    return [(row.referrer, row.click_count) for row in result.all()]

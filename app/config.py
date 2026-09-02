@@ -102,4 +102,4 @@ def get_settings() -> Settings:
     environment. Tests can override by calling ``get_settings.cache_clear()``
     after mutating the environment.
     """
-    return Settings()  # type: ignore[call-arg]  # values sourced from env/.env
+    return Settings()  # values sourced from env/.env
